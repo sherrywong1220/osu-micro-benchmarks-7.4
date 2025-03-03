@@ -45,8 +45,7 @@ int main(int argc, char *argv[])
     MPI_Datatype mpi_type_list[OMB_NUM_DATATYPES];
 
     set_header(HEADER);
-    set_benchmark_name("osu_get_bw");
-
+    set_benchmark_name("osu_get_mbw");
     po_ret = process_options(argc, argv);
     omb_populate_mpi_type_list(mpi_type_list);
     if (options.validate) {
@@ -88,7 +87,7 @@ int main(int argc, char *argv[])
             case PO_BAD_USAGE:
                 print_bad_usage_message(rank);
             case PO_HELP_MESSAGE:
-                usage_one_sided("osu_get_bw");
+                usage_one_sided("osu_get_mbw");
                 break;
             case PO_VERSION_MESSAGE:
                 print_version_message(rank);
@@ -124,19 +123,7 @@ int main(int argc, char *argv[])
     }
 
     print_header_one_sided(rank, options.win, options.sync, MPI_CHAR);
-
-    // 设置默认pairs数量
     options.pairs = nprocs / 2;
-    
-    // 验证pairs参数
-    if (options.pairs > (nprocs / 2)) {
-        if (rank == 0) {
-            fprintf(stderr, "Invalid pairs parameter: %d\n", options.pairs);
-            fprintf(stderr, "pairs must be less than or equal to (np / 2)\n");
-        }
-        omb_mpi_finalize(omb_init_h);
-        exit(EXIT_FAILURE);
-    }
 
     switch (options.sync) {
         case LOCK:
@@ -172,13 +159,18 @@ int main(int argc, char *argv[])
 
     return EXIT_SUCCESS;
 }
-
 void print_bw(int rank, int size, double t, struct omb_stat_t omb_stat)
 {
     if (rank == 0) {
-        double tmp = size / 1e6 * options.iterations * options.window_size;
-        fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION,
-                tmp / t);
+        // Calculate aggregate bandwidth across all pairs
+        double tmp = size / 1e6 * options.iterations * options.window_size * options.pairs;
+        double bw = tmp / t;  // Aggregate bandwidth
+        double msg_rate = 1e6 * options.pairs * options.iterations * options.window_size / t;
+
+        fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION, bw);
+        if (options.print_rate) {
+            fprintf(stdout, "%*.*f", FIELD_WIDTH, FLOAT_PRECISION, msg_rate);
+        }
         if (options.omb_tail_lat) {
             OMB_ITR_PRINT_STAT(omb_stat.res_arr);
         }
@@ -186,7 +178,6 @@ void print_bw(int rank, int size, double t, struct omb_stat_t omb_stat)
         fflush(stdout);
     }
 }
-
 #if MPI_VERSION >= 3
 /*Run GET with flush local */
 void run_get_with_flush_local(int rank, enum WINDOW type)
@@ -325,8 +316,8 @@ void run_get_with_flush(int rank, enum WINDOW type)
                                                    size, options.iterations);
             MPI_CHECK(MPI_Barrier(omb_comm));
 
-            MPI_CHECK(MPI_Win_lock(MPI_LOCK_SHARED, target, 0, wins[rank]));
             for (i = 0; i < options.skip + options.iterations; i++) {
+                MPI_CHECK(MPI_Barrier(omb_comm));
                 if (i == options.skip) {
                     omb_papi_start(&papi_eventset);
                     t_start = MPI_Wtime();
@@ -335,6 +326,7 @@ void run_get_with_flush(int rank, enum WINDOW type)
                     t_graph_start = MPI_Wtime();
                 }
                 
+                MPI_CHECK(MPI_Win_lock(MPI_LOCK_SHARED, target, 0, wins[rank]));
                 for (j = 0; j < window_size; j++) {
                     MPI_CHECK(MPI_Get(r_bufs[rank] + (j * size), size, MPI_CHAR,
                                     target, disp + (j * size), size, MPI_CHAR, 
@@ -342,6 +334,7 @@ void run_get_with_flush(int rank, enum WINDOW type)
                 }
                 
                 MPI_CHECK(MPI_Win_flush(target, wins[rank]));
+                MPI_CHECK(MPI_Win_unlock(target, wins[rank]));
                 
                 if (i >= options.skip) {
                     t_graph_end = MPI_Wtime();
@@ -358,8 +351,13 @@ void run_get_with_flush(int rank, enum WINDOW type)
                 }
             }
             t_end = MPI_Wtime();
-            MPI_CHECK(MPI_Win_unlock(target, wins[rank]));
             t = t_end - t_start;
+        } else if (rank < 2 * options.pairs) {
+            MPI_CHECK(MPI_Barrier(omb_comm));
+            // Target processes participate in barriers
+            for (i = 0; i < options.skip + options.iterations; i++) {
+                MPI_CHECK(MPI_Barrier(omb_comm));
+            }
         }
 
         MPI_CHECK(MPI_Barrier(omb_comm));
@@ -368,21 +366,10 @@ void run_get_with_flush(int rank, enum WINDOW type)
         double t_total = 0.0;
         MPI_CHECK(MPI_Reduce(&t, &t_total, 1, MPI_DOUBLE, MPI_SUM, 0, omb_comm));
         t = t_total / options.pairs;
-
         omb_stat = omb_calculate_tail_lat(omb_lat_arr, rank, 1);
         omb_papi_stop_and_print(&papi_eventset, size);
-        
-        // 更新带宽计算以考虑多对
-        if (rank == 0) {
-            double tmp = size / 1e6 * options.iterations * options.window_size * options.pairs;
-            fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION,
-                    tmp / t);
-            if (options.omb_tail_lat) {
-                OMB_ITR_PRINT_STAT(omb_stat.res_arr);
-            }
-            fprintf(stdout, "\n");
-            fflush(stdout);
-        }
+        print_bw(rank, size, t, omb_stat);
+
 
         // 释放资源
         for (i = 0; i < options.pairs; i++) {
