@@ -112,9 +112,9 @@ int main(int argc, char *argv[])
             break;
     }
 
-    if (nprocs != 2) {
+    if (nprocs < 2) {
         if (rank == 0) {
-            fprintf(stderr, "This test requires exactly two processes\n");
+            fprintf(stderr, "This test requires two or more processes\n");
         }
 
         omb_mpi_finalize(omb_init_h);
