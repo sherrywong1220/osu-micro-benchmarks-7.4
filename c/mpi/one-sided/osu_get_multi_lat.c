@@ -140,7 +140,7 @@ int main(int argc, char *argv[])
 void print_multi_latency(int rank, int size, double t_total, int iterations, struct omb_stat_t omb_stat)
 {
     if (rank == 0) {
-        double latency = (t_total * 1e6) / iterations;
+        double latency = (t_total * 1e6) / iterations / 2;
         fprintf(stdout, "%-*d%*.*f", 10, size, FIELD_WIDTH, FLOAT_PRECISION, latency);
         if (options.omb_tail_lat) {
             OMB_ITR_PRINT_STAT(omb_stat.res_arr);
@@ -209,7 +209,7 @@ void run_pscw_with_multi(int rank, int pairs, enum WINDOW type)
             
             for (i = 0; i < options.skip + options.iterations; i++) {
                 MPI_CHECK(MPI_Barrier(omb_comm));
-                
+                MPI_CHECK(MPI_Win_start(group, 0, my_win));
                 if (i == options.skip) {
                     omb_papi_start(&papi_eventset);
                     t_start = MPI_Wtime();
@@ -218,9 +218,6 @@ void run_pscw_with_multi(int rank, int pairs, enum WINDOW type)
                 if (i >= options.skip) {
                     t_graph_start = MPI_Wtime();
                 }
-                
-                // 启动访问窗口
-                MPI_CHECK(MPI_Win_start(group, 0, my_win));
                 
                 // 执行Get操作
                 MPI_CHECK(MPI_Get(my_rbuf, size, MPI_CHAR, target, disp, size, MPI_CHAR, my_win));
@@ -295,7 +292,7 @@ void run_pscw_with_multi(int rank, int pairs, enum WINDOW type)
         print_multi_latency(rank, size, t_total, options.iterations, omb_stat);
         
         if (options.graph && 0 == rank) {
-            omb_graph_data->avg = (t_total * 1.0e6) / options.iterations;
+            omb_graph_data->avg = (t_total * 1.0e6) / options.iterations / 2;
         }
         
         if (options.graph) {
